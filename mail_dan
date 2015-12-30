@@ -1,0 +1,184 @@
+#!/bin/bash
+#
+# MailDan v1.0
+
+# Don't change these!
+export VERSION='1.1';       # Script version
+export CHECK_FREQUENCY=60;  # Frequency to hit Google to check for mail
+
+export IGNORE_MAIL_COUNT=0; # Only show the mail icon if this is set
+
+# Help
+function display_help() {
+
+	echo ''
+	echo "MailDan v${VERSION}"
+	echo ''
+	echo '   --ignore_mail_count - Hide the mail count.'
+	echo ''
+
+}
+
+# Parse command arguments
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--ignore_mail_count)
+			IGNORE_MAIL_COUNT=1
+			shift
+			;;
+		--help|-h|-?)
+			display_help
+			exit 0
+			;;
+		*)
+			echo "Unrecognised paramter ${1}. Please use the --help switch to see usage." >&2
+			exit 1
+			;;
+	esac
+done
+
+# Dependencies
+function check_deps() {
+
+	local __missing_dep=0
+
+	return $__missing_dep
+
+}
+
+# Check if we're on a Mac and can access the mail app
+function check_mac() {
+
+	local __is_mac=1
+
+	if [ $(uname) == 'Darwin' ]; then
+		if [ ! -z "$(which osascript)" ]; then
+			__is_mac=0
+		fi
+	fi
+
+	return $__is_mac
+
+}
+
+# Hit Google's mail servers directly for mail
+function get_mail_from_server() {
+
+	local __mail_count
+	local __total_mail_count
+	local __response
+	local __user
+	local __pass
+	local __last_check
+	local __last_count
+
+	# First, check whether we're using the cache
+	__last_check=0
+	__last_count='?'
+	if [ -f "$HOME/.mail_dan_cache" ]; then
+		__last_check=$(cat $HOME/.mail_dan_cache | head -n 1)
+		__last_count=$(cat $HOME/.mail_dan_cache | tail -n 1)
+	fi
+
+	# If we're within the cache time, just return the last count.
+	if [ $(date +%s) -lt $(($__last_check+$CHECK_FREQUENCY)) ]; then
+		echo $__last_count
+		return 0
+	fi
+
+	# Log what time we did this check, with an unknown mail count
+	date +%s > $HOME/.mail_dan_cache
+	echo $__last_check >> $HOME/.mail_dan_cache
+
+	# Check whether we have a list of username / passwords
+	if [ ! -f "$HOME/.mail_dan_accounts" -o $(cat $HOME/.mail_dan_accounts | wc -l) -eq 0 ]; then
+		return 1
+	fi
+
+	# Initialise the total mail count
+	__total_mail_count=0
+
+	# Now iterate through each account
+	while read -r line; do
+
+		__user=$(echo $line | sed 's/ .*$//g')
+		__pass=$(echo $line | sed 's/^.* //g')
+
+		__response=$(curl -u "${__user}:${__pass}" "https://mail.google.com/mail/feed/atom")
+		if [ $? -ne 0 ]; then
+			return 1
+		fi
+		__mail_count=$(echo $__response | sed 's|^.*<fullcount>||g' | sed 's|</fullcount>.*$||g')
+		__total_mail_count=$(($__total_mail_count+$__mail_count))
+
+	done < ~/.mail_dan_accounts
+
+	unset __user
+	unset __pass
+
+	date +%s > $HOME/.mail_dan_cache
+	echo $__total_mail_count >> $HOME/.mail_dan_cache
+
+	echo -n $__total_mail_count
+	return 0
+
+}
+
+check_deps
+mail_source='?'
+mail_res=1
+mail_status='-'
+if [ $? -ne 0 ]; then
+	echo 'Missing dependancies. Unable to get mail count.' >&2
+else
+
+	check_mac
+	if [ $? -eq 0 ]; then
+		mail_open=$(echo 'tell application "System Events" to (name of processes) contains "Mail"' | osascript)
+	else
+		mail_open='false'
+	fi
+
+	# First thing to try: Is the Mail app open? If so, this is our preferred way of getting the mail count.
+	if [ "$mail_open" == "true" ]; then
+
+		mail_count=$(echo 'Application("Mail").inbox.unreadCount();' | osascript -l JavaScript 2> /dev/null)
+		mail_res=$?
+		if [ $mail_res -eq 0 ]; then
+			mail_source='M'
+		fi
+
+	fi
+
+	# Next, can we hit Google directly to get the mail count?
+	if [ $mail_res -ne 0 ]; then
+
+		mail_count=$(get_mail_from_server)
+		mail_res=$?
+		mail_source='G'
+
+		if [ $mail_res -ne 0 ]; then
+			if [ ! -f "$HOME/.mail_dan_accounts" -o $(cat $HOME/.mail_dan_accounts | wc -l) -eq 0 ]; then
+				mail_status='!'
+			fi
+		fi
+
+	fi
+
+fi
+
+if [ $mail_res -eq 0 -a $mail_count -gt 0 ]; then
+	icon='📫'
+else
+	icon='📪'
+fi
+
+if [ $IGNORE_MAIL_COUNT -eq 1 ]; then
+	echo -n "$icon "
+elif [ $mail_res -ne 0 ]; then
+	echo -n "$icon  $mail_status"
+else
+	echo -n "$icon  $mail_count"
+fi
+
+exit $mail_res
